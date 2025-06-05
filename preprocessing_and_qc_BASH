@@ -1,0 +1,23 @@
+a[SNP] = lowest_missingness_seen] 
+[awk 'FNR==1 && NR!=1 { next } 
+     { if (!($2 in a) || $6 < a[$2]) { a[$2]=$6 } } 
+     END { for (snp in a) print snp }' mega_missing.lmiss neuro_missing.lmiss > keep_snps.txt
+[# Filter both datasets
+./plink_linux_x86_64_20241022/plink --bfile MEGA_Chip --extract keep_snps.txt --make-bed --out MEGA_best
+./plink_linux_x86_64_20241022/plink --bfile Neuro_Chip --extract keep_snps.txt --make-bed --out Neuro_best
+
+# Merge them
+echo -e "Neuro_best.bed Neuro_best.bim Neuro_best.fam" > merge_list.txt
+./plink_linux_x86_64_20241022/plink --bfile MEGA_best --merge-list merge_list.txt --make-bed --out merged_MEGA_Neuro_best
+./plink --bfile merged_MEGA_Neuro_best \
+  --geno 0.05 \             
+  --make-bed --out qc_step1_geno
+./plink --bfile qc_step1_geno \
+  --maf 0.01 \              
+  --make-bed --out qc_step2_maf
+./plink --bfile qc_step2_maf \
+  --hwe 1e-6 \              
+  --make-bed --out qc_step3_hwe
+./plink --bfile qc_step3_hwe \
+  --mind 0.05 \            
+  --make-bed --out qc_step4_mind
