@@ -1,0 +1,159 @@
+# SCRIPT TO COLLECT AND FILTER FUMA RESULTS + CYTOSCAPE NETWORK
+# =============================================================
+
+# Install and load required packages
+if (!require(dplyr)) install.packages("dplyr")
+library(dplyr)
+
+if (!require(BiocManager)) install.packages("BiocManager")
+library(BiocManager)
+
+if (!require(biomaRt)) BiocManager::install("biomaRt")
+library(biomaRt)
+
+if (!require(rWikiPathways)) BiocManager::install("rWikiPathways")
+library(rWikiPathways)
+
+if (!require(RCy3)) BiocManager::install("RCy3")
+library(RCy3)
+
+if (!require(tidyr)) install.packages("tidyr")
+library(tidyr)
+
+if (!require(tibble)) install.packages("tibble")
+library(tibble)
+
+# Set working directory to your FUMA folder
+setwd("C:/Users/malai/OneDrive/Desktop/INTERNSHIP/Data/FUMA_results/SNP2GENE/SSAGA_Depressive_Ep_sugg")
+
+# Function to find gene-gene interactions via shared SNPs
+extract_shared_SNP_interactions <- function(x) {
+  result <- x %>% group_by(uniqID) %>% filter(n() > 1) %>%
+    summarise(gene = toString(unique(gene))) %>% ungroup()
+  
+  generate_pairs <- function(x) {
+    elements <- strsplit(x, ", ")[[1]]
+    combn(elements, 2, simplify = FALSE)
+  }
+  
+  pairs_df <- unique(result %>% rowwise() %>%
+                       mutate(pairs = list(generate_pairs(gene))) %>%
+                       unnest(cols = c(pairs)) %>%
+                       mutate(source = sapply(pairs, `[`, 1),
+                              target = sapply(pairs, `[`, 2)) %>%
+                       dplyr::select(source, target))
+  
+  return(pairs_df)
+}
+
+# ============================================
+# READ FUMA OUTPUT FILES
+# ============================================
+
+annov <- read.table("annov.txt", header = TRUE, sep = "\t")
+annov.filt <- annov[annov$annot %in% c("intronic","exonic","UTR3","UTR5"),]
+annov.genes <- annov.filt[,c("gene", "symbol")]
+annov.genes$type <- "SNP"
+annov.genes <- unique(annov.genes)
+
+annov.snp.gene <- annov.filt[,c(1,2)]
+annov.snp.gene <- unique(annov.snp.gene)
+
+eqtl <- read.table("eqtl.txt", header = TRUE, sep = "\t")
+eqtl.genes <- eqtl[,c("gene", "symbol")]
+eqtl.genes$type <- "eQTL"
+eqtl.genes <- unique(eqtl.genes)
+
+eqtl.snp.gene <- eqtl[,c(1,4)]
+
+snp.gene <- rbind(annov.snp.gene, eqtl.snp.gene)
+snp.gene <- unique(snp.gene)
+
+genes <- rbind(annov.genes, eqtl.genes)
+genes <- genes %>% group_by(gene, symbol) %>% summarise(type = toString(unique(type)))
+
+shared.snps <- extract_shared_SNP_interactions(snp.gene)
+
+rm(eqtl, eqtl.snp.gene, annov.snp.gene, snp.gene, annov.genes, eqtl.genes)
+
+# ============================================
+# MAP TO ENTREZ GENE IDENTIFIERS
+# ============================================
+
+mart <- biomaRt::useMart(biomart = "ensembl", dataset = "hsapiens_gene_ensembl")
+
+mapping <- biomaRt::getBM(filters = "ensembl_gene_id",
+                          attributes = c("ensembl_gene_id","entrezgene_id"),
+                          values = unique(genes$gene), 
+                          mart = mart)
+
+genes <- merge(genes, mapping, by.x = "gene", by.y = "ensembl_gene_id", all.x = TRUE)
+genes$node.type <- "Gene"
+genes <- genes[order(genes$entrezgene_id), ]
+genes <- genes[!duplicated(genes$gene), ]
+genes$entrezgene_id[is.na(genes$entrezgene_id)] <- genes$symbol[is.na(genes$entrezgene_id)]
+
+shared.snps$source <- genes$entrezgene_id[match(shared.snps$source, genes$gene)]
+shared.snps$target <- genes$entrezgene_id[match(shared.snps$target, genes$gene)]
+shared.snps <- as.data.frame(t(apply(shared.snps, 1, function(x) sort(x))))
+shared.snps <- unique(shared.snps)
+colnames(shared.snps) <- c("source", "target")
+shared.snps$interaction <- "gene-gene"
+
+# ============================================
+# LOAD PATHWAY INFO FROM .gmt FILE
+# ============================================
+
+pathways <- rWikiPathways::readGMT("C:/Users/malai/OneDrive/Desktop/INTERNSHIP/Data/FUMA_results/c2.cp.v2025.1.Hs.entrez.gmt")
+
+pathways.filt <- pathways[pathways$gene %in% genes$entrezgene_id,]
+colnames(pathways.filt) <- c("source", "target")
+pathways.filt$interaction <- "pathway-gene"
+
+nodes.g <- genes[,c(4,2)]
+colnames(nodes.g) <- c("id", "label")
+nodes.p <- unique(pathways.filt[,c(1,1)])
+colnames(nodes.p) <- c("id", "label")
+nodes <- rbind(nodes.g, nodes.p)
+
+nodes.p$node.type <- "pathway"
+
+edges <- rbind(pathways.filt, shared.snps)
+
+# ============================================
+# CREATE CYTOSCAPE NETWORK
+# ============================================
+
+RCy3::createNetworkFromDataFrames(nodes = nodes, edges = edges, title = "FUMA")
+RCy3::loadTableData(genes, data.key.column = "entrezgene_id", table.key.column = "id")
+RCy3::loadTableData(nodes.p, data.key.column = "label", table.key.column = "label")
+
+RCy3::createVisualStyle("pathway-gene")
+RCy3::setNodeColorMapping(table.column = "node.type",
+                          table.column.values = c("Gene", "pathway"),
+                          mapping.type = "d",
+                          colors = c("#ff9933"), default.color = "#D9D9D9", style.name = "pathway-gene")
+RCy3::setNodeShapeMapping("node.type",
+                          table.column.values = c("Gene", "pathway"),
+                          shapes = c("ELLIPSE", "DIAMOND"),
+                          style.name = "pathway-gene")
+RCy3::setNodeSizeMapping("node.type",
+                         table.column.values = c("Gene", "pathway"),
+                         sizes = c(60, 40),
+                         mapping.type = "d",
+                         style.name = "pathway-gene")
+RCy3::setNodeLabelMapping("symbol", style.name = "pathway-gene")
+RCy3::setNodeFontSizeDefault("25", style.name = "pathway-gene")
+RCy3::setNodeBorderWidthDefault(0, style.name = "pathway-gene")
+RCy3::setEdgeColorDefault("#AFAAAA", style.name = "pathway-gene")
+RCy3::setEdgeLineWidthDefault(2, style.name = "pathway-gene")
+RCy3::setEdgeLineStyleMapping("interaction",
+                              c("pathway-gene", "shared SNP"),
+                              c("SOLID", "LONG_DASH"),
+                              default = "SOLID",
+                              style.name = "pathway-gene")
+RCy3::setVisualStyle("pathway-gene")
+
+# Save gene list to file
+write.table(genes$gene, "genelist.txt", col.names = FALSE, row.names = FALSE, quote = FALSE, sep = "\t")
+
